@@ -11,7 +11,7 @@ import numpy as np
 from caffe import Classifier, set_device, set_mode_gpu
 from deepdreamer.images2gif import writeGif
 from scipy.ndimage import affine_transform, zoom
-from PIL.Image import fromarray as img_fromarray, open as img_open
+from PIL.Image import BILINEAR, fromarray as img_fromarray, open as img_open
 import logging
 
 logging.basicConfig(
@@ -50,7 +50,8 @@ def _deprocess(net, img):
 
 
 def _make_step(
-        net, step_size=1.5, end="inception_4c/output", jitter=32, clip=True):
+        net, step_size=1.5, end="inception_4c/output", jitter=32, clip=True,
+        guide_features=np.zeros(0)):
     """ Basic gradient ascent step. """
 
     src = net.blobs["data"]
@@ -62,7 +63,12 @@ def _make_step(
     src.data[0] = np.roll(np.roll(src.data[0], ox, -1), oy, -2)
 
     net.forward(end=end)
-    dst.diff[:] = dst.data  # specify the optimization objective
+    # specify the optimization objective
+    if guide_features.any():
+        _guided_objective(dst, guide_features)
+    else:
+        _unguided_objective(dst)
+
     net.backward(start=end)
     g = src.diff[0]
     # apply normalized ascent step to the input image
@@ -73,6 +79,45 @@ def _make_step(
     if clip:
         bias = net.transformer.mean["data"]
         src.data[:] = np.clip(src.data, -bias, 255-bias)
+
+
+def _unguided_objective(dst):
+    dst.diff[:] = dst.data
+
+
+def _guided_objective(dst, guide_features):
+    # Instead of maximizing the L2-norm of current image activations, we try to
+    # maximize the dot-products between activations of current image, and their
+    # best matching correspondences from the guide image.
+    x = dst.data[0].copy()
+    y = guide_features
+    ch = x.shape[0]
+    x = x.reshape(ch, -1)
+    y = y.reshape(ch, -1)
+    A = x.T.dot(y) # compute the matrix of dot-products with guide features
+    dst.diff[0].reshape(ch, -1)[:] = y[:, A.argmax(1)] # select best matches
+
+
+def _prep_guide_get_features(
+        net, guideimage_path, end="inception_4c/output", target_w=244,
+        target_h=244):
+    pimage = img_open(guideimage_path)
+
+    (w, h) = pimage.size
+
+    # For best results, the guide image should be limited to the same
+    # maximum width and height that the network being used was trained
+    # with.  Default to 244 pixels for GoogLeNet.
+    # FIXME this doesn't maintain aspect ratio, maybe use PIL.thumbnail ?
+    if w != target_w or h != target_h:
+        pimage = pimage.resize((target_w, target_h), BILINEAR)
+    image = np.float32(pimage)
+    src = net.blobs["data"]
+    dst = net.blobs[end]
+    src.reshape(1, 3, target_h, target_w)
+    src.data[0] = _preprocess(net, image)
+    net.forward(end=end)
+    return dst.data[0].copy()
 
 
 def _deepdream(
@@ -148,7 +193,7 @@ def deepdream(
         img_path, zoom=True, scale_coefficient=0.05, irange=100, iter_n=10,
         octave_n=4, octave_scale=1.4, end="inception_4c/output", clip=True,
         network="bvlc_googlenet", gif=False, reverse=False, duration=0.1,
-        loop=False, gpu=False, gpuid=0):
+        loop=False, gpu=False, gpuid=0, guideimage=""):
     img = np.float32(img_open(img_path))
     s = scale_coefficient
     h, w = img.shape[:2]
@@ -165,6 +210,11 @@ def deepdream(
 
     img_pool = [img_path]
 
+    if guideimage != "":
+        guide_features = _prep_guide_get_features(net, guideimage)
+    else:
+        guide_features = np.zeros(0)
+
     # Save settings used in a log file
     logging.info((
         "{} zoom={}, scale_coefficient={}, irange={}, iter_n={}, "
@@ -177,7 +227,8 @@ def deepdream(
     for i in range(irange):
         img = _deepdream(
             net, img, iter_n=iter_n, octave_n=octave_n,
-            octave_scale=octave_scale, end=end, clip=clip)
+            octave_scale=octave_scale, end=end, clip=clip,
+            guide_features=guide_features)
         img_fromarray(np.uint8(img)).save("{}_{}.jpg".format(
             img_path, i))
         if gif:

@@ -34,6 +34,9 @@ def main():
             "--layers", type=str, default="inception_4c/output",
             help="dream layers (default: inception_4c/output)")
         parser.add_argument(
+            "--guide", type=str, default="",
+            help="Guide image to use (default: none)")
+        parser.add_argument(
             "--clip", choices=["true", "false"], default="true",
             help="clip dreams (default: true)")
         parser.add_argument(
@@ -99,7 +102,8 @@ def main():
                 irange=args.dreams, iter_n=args.itern, octave_n=args.octaves,
                 octave_scale=args.octave_scale, end=args.layers, clip=clip,
                 network=args.network, gif=gif, reverse=reverse,
-                duration=args.duration, loop=loop, gpu=gpu, gpuid=args.gpuid)
+                duration=args.duration, loop=loop, gpu=gpu, gpuid=args.gpuid,
+                guideimage=args.guide)
     except Exception as e:
         print("Error: {}".format(e))
         sys.exit(2)
